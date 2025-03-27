@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract ERC5727SBT is ERC721URIStorage, AccessControl {
+contract ERC5727SBT is ERC721, AccessControl, ReentrancyGuard {
     bytes32 public constant ISSUER_ROLE = keccak256("ISSUER_ROLE");
 
     struct Token {
@@ -23,14 +24,28 @@ contract ERC5727SBT is ERC721URIStorage, AccessControl {
     mapping(address => uint256[]) private _ownedTokens;
     mapping(uint256 => address) private _issuers;
     mapping(address => string) private _adminInstitutions; // Mapping from admin address to their institution
+    mapping(address => uint256) private _adminIndices; // Track position of each admin in the adminList array
 
     event Issued(address indexed to, uint256 indexed tokenId);
     event Revoked(address indexed from, uint256 indexed tokenId);
     event AdminAssigned(address indexed admin);
     event AdminRevoked(address indexed admin);
+    // Add this to match ERC721URIStorage events
+    event MetadataUpdate(uint256 _tokenId);
 
     constructor() ERC721("SoulboundToken", "SBT") {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender); // Deployer is the super admin
+    }
+
+    // Override tokenURI function from ERC721
+    function tokenURI(
+        uint256 tokenId
+    ) public view override returns (string memory) {
+        require(
+            _tokens[tokenId].owner != address(0),
+            "ERC721: URI query for nonexistent token"
+        );
+        return _tokens[tokenId].metadataURI;
     }
 
     // =========================================== //
@@ -48,6 +63,7 @@ contract ERC5727SBT is ERC721URIStorage, AccessControl {
 
         grantRole(ISSUER_ROLE, admin);
         adminList.push(admin);
+        _adminIndices[admin] = adminList.length - 1; // Store the admin's index
         _adminInstitutions[admin] = institution; // Store institution
 
         emit AdminAssigned(admin);
@@ -58,14 +74,21 @@ contract ERC5727SBT is ERC721URIStorage, AccessControl {
         require(hasRole(ISSUER_ROLE, admin), "Not an admin");
         revokeRole(ISSUER_ROLE, admin);
 
-        // Remove admin from the list
-        for (uint256 i = 0; i < adminList.length; i++) {
-            if (adminList[i] == admin) {
-                adminList[i] = adminList[adminList.length - 1]; // Move last element to deleted position
-                adminList.pop(); // Remove last element
-                break;
-            }
+        // Remove admin from the list using the stored index
+        uint256 indexToRemove = _adminIndices[admin];
+        uint256 lastIndex = adminList.length - 1;
+
+        if (indexToRemove != lastIndex) {
+            // If not removing the last element, move the last element to this position
+            address lastAdmin = adminList[lastIndex];
+            adminList[indexToRemove] = lastAdmin;
+            _adminIndices[lastAdmin] = indexToRemove; // Update the index mapping for the moved admin
         }
+
+        // Remove the last element and clean up
+        adminList.pop();
+        delete _adminIndices[admin];
+
         emit AdminRevoked(admin);
     }
 
@@ -93,24 +116,30 @@ contract ERC5727SBT is ERC721URIStorage, AccessControl {
     // ===== [2] Institution Admin Functions ===== //
     // =========================================== //
 
-    //Issue a Soulbound Token (SBT) to an address.
+    // Issue a Soulbound Token (SBT) to an address.
     function issue(
         address to,
         uint256 slot,
         string memory metadataURI
-    ) external onlyRole(ISSUER_ROLE) {
+    ) external onlyRole(ISSUER_ROLE) nonReentrant {
         require(to != address(0), "Cannot mint to zero address");
 
+        // 1. Check conditions - already done with the require statement above
+
+        // 2. Update state variables
         uint256 tokenId = ++_tokenCounter;
         _tokens[tokenId] = Token(to, tokenId, slot, false, metadataURI);
         _issuers[tokenId] = msg.sender;
         _ownedTokens[to].push(tokenId);
         _allTokens.push(tokenId);
 
+        // 3. Perform external calls
         _safeMint(to, tokenId);
-        _setTokenURI(tokenId, metadataURI);
 
+        // 4. Emit events
         emit Issued(to, tokenId);
+        // Emit this to maintain compatibility with ERC721URIStorage events
+        emit MetadataUpdate(tokenId);
     }
 
     // Revoke a Soulbound Token (SBT).
@@ -134,7 +163,6 @@ contract ERC5727SBT is ERC721URIStorage, AccessControl {
         return _adminInstitutions[msg.sender];
     }
 
-    // ✅ Get all issued token details for the caller
     // ✅ Get all issued token details for the caller
     function getAllIssuedTokenDetails()
         external
@@ -172,6 +200,25 @@ contract ERC5727SBT is ERC721URIStorage, AccessControl {
     // ===== [3] Institution User Functions ===== //
     // ========================================== //
 
+    // ✅ Fetch all tokens received by the caller (Institution User)
+    function getAllReceivedTokenDetails()
+        external
+        view
+        returns (Token[] memory)
+    {
+        uint256 totalOwned = _ownedTokens[msg.sender].length;
+        require(totalOwned > 0, "No tokens received");
+
+        Token[] memory receivedTokens = new Token[](totalOwned);
+
+        for (uint256 i = 0; i < totalOwned; i++) {
+            uint256 tokenId = _ownedTokens[msg.sender][i];
+            receivedTokens[i] = _tokens[tokenId];
+        }
+
+        return receivedTokens;
+    }
+
     // Check if a token is revoked. Return True if revoked, false otherwise.
     function isRevoked(
         uint256 tokenId
@@ -198,13 +245,13 @@ contract ERC5727SBT is ERC721URIStorage, AccessControl {
 
     function supportsInterface(
         bytes4 interfaceId
-    ) public view override(AccessControl, ERC721URIStorage) returns (bool) {
+    ) public view override(AccessControl, ERC721) returns (bool) {
         return
             interfaceId == type(AccessControl).interfaceId ||
-            interfaceId == type(ERC721URIStorage).interfaceId ||
             interfaceId == 0x80ac58cd || // ERC-721 compatibility for OpenSea & MetaMask
             interfaceId == 0x00000000 || // Placeholder for ERC-5727
             interfaceId == 0x01ffc9a7 || // ERC-165 support
+            interfaceId == 0x5b5e139f || // ERC-721Metadata interface ID for tokenURI
             super.supportsInterface(interfaceId);
     }
 }
