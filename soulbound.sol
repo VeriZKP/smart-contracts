@@ -207,13 +207,32 @@ contract ERC5727SBT is ERC721, AccessControl, ReentrancyGuard {
         returns (Token[] memory)
     {
         uint256 totalOwned = _ownedTokens[msg.sender].length;
-        require(totalOwned > 0, "No tokens received");
 
-        Token[] memory receivedTokens = new Token[](totalOwned);
+        if (totalOwned == 0) {
+            return new Token[](0);
+        }
+
+        // Create a temp array with a maximum possible size
+        Token[] memory tempTokens = new Token[](totalOwned);
+        uint256 count = 0;
 
         for (uint256 i = 0; i < totalOwned; i++) {
             uint256 tokenId = _ownedTokens[msg.sender][i];
-            receivedTokens[i] = _tokens[tokenId];
+
+            // ✅ Skip revoked tokens
+            if (!_tokens[tokenId].revoked) {
+                tempTokens[count] = _tokens[tokenId];
+                count++;
+            }
+        }
+
+        // ✅ Create final trimmed array
+        Token[] memory receivedTokens = new Token[](count);
+
+        if (count != 0) {
+            for (uint256 j = 0; j < count; j++) {
+                receivedTokens[j] = tempTokens[j];
+            }
         }
 
         return receivedTokens;
