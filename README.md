@@ -34,6 +34,3 @@ Institution Admin
 
 Institution User
 1. Get All Received NFT
-
----
-## 🔐 Verifier Smart Contract
